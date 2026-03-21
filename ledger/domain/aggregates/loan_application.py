@@ -5,6 +5,22 @@ LoanApplication aggregate (Phase 1):
 - Deterministic state reconstruction from the loan stream.
 - Strict state transitions.
 - Invariants around decision confidence + compliance hard-blocks (when known).
+
+LoanApplication lifecycle states:
+
+1. SUBMITTED
+2. DOCUMENTS_PENDING
+3. DOCUMENTS_UPLOADED
+4. DOCUMENTS_PROCESSED
+5. CREDIT_ANALYSIS_REQUESTED → CREDIT_ANALYSIS_COMPLETE
+6. FRAUD_SCREENING_REQUESTED → FRAUD_SCREENING_COMPLETE
+7. COMPLIANCE_CHECK_REQUESTED → COMPLIANCE_CHECK_COMPLETE
+
+Terminal outcomes:
+- APPROVED
+- DECLINED
+- DECLINED_COMPLIANCE
+- REFERRED
 """
 
 from __future__ import annotations
@@ -12,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Iterable
+from typing import Callable, Iterable
 
 from ledger.domain.errors import IllegalStateTransition, InvariantViolation
 from ledger.schema.events import ApplicationState, BaseEvent, StoredEvent, deserialize_event
@@ -212,3 +228,23 @@ class LoanApplication:
         for e in events_list:  # type: ignore[assignment]
             agg.apply(e)  # type: ignore[arg-type]
         return agg
+    
+    @classmethod
+    def load(cls, event_fetcher: Callable[[str], Iterable[StoredEvent]], application_id: str) -> "LoanApplication":
+        """
+        Load a LoanApplication from the event store.
+
+        Args:
+            event_fetcher: Callable that takes application_id and returns Iterable[StoredEvent].
+            application_id: The ID of the LoanApplication to load.
+
+        Returns:
+            LoanApplication instance reconstructed from events.
+
+        Raises:
+            ValueError: If no events are found for the given application_id.
+        """
+        events = list(event_fetcher(application_id))
+        if not events:
+            raise ValueError(f"No events found for LoanApplication {application_id}")
+        return cls.rebuild(events)

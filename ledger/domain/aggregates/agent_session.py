@@ -180,3 +180,14 @@ class AgentSession:
         for e in events_list:
             agg.apply(e)
         return agg
+        
+    @classmethod
+    def load(cls, event_fetcher: "Callable[[str], Iterable[StoredEvent]]", session_id: str) -> "AgentSession":
+        """
+        Load an AgentSession from the event store.
+        event_fetcher: function(session_id) -> Iterable[StoredEvent]
+        """
+        events = list(event_fetcher(session_id))
+        if not events:
+            raise ValueError(f"No events found for AgentSession {session_id}")
+        return cls.rebuild(events)
