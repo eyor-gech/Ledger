@@ -1,0 +1,9 @@
+mvenv/
+__pycache__/
+.env
+.pytest_cache/
+pytest.ini
+structure.md
+structure.py
+documents/
+data/
