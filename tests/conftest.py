@@ -9,13 +9,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 random.seed(42); Faker.seed(42)
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def db_url():
     url = os.environ.get("TEST_DB_URL", "postgresql://localhost/apex_ledger_test")
-
-    if "test" not in url:
-        raise RuntimeError(f"Refusing to run tests on non-test DB: {url}")
-
+    
+    # HARD BLOCK: Prevent production accidents
+    forbidden_keywords = ["prod", "live", "main", "actual", "billing"]
+    if any(k in url.lower() for k in forbidden_keywords) or "test" not in url.lower():
+        print(f"\n CRITICAL SAFETY VIOLATION: Refusing to run on {url}")
+        sys.exit(1)
+        
     return url
 
 @pytest.fixture

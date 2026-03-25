@@ -147,7 +147,7 @@ class EventStore:
             return []
         for event in events:
             et = event.get("event_type")
-
+            
             if not et:
                 raise DomainSemanticError(event_type="MISSING")
 
@@ -521,8 +521,14 @@ class InMemoryEventStore:
         for event in events:
             et = event.get("event_type")
 
+            # 1. ENFORCE REGISTRY (Fixes Audit Finding 1)
             if et not in EVENT_REGISTRY:
-                raise DomainSemanticError(event_type=et)
+                raise DomainSemanticError(f"Unregistered event type: {et}")
+            
+            # 2. SEMANTIC GUARD (Fact-Not-State Audit)
+            forbidden = {"update", "set", "modify", "change", "delete", "test"}
+            if any(term in et.lower() for term in forbidden):
+                raise DomainSemanticError(f"Semantic violation: {et} implies state-mutation naming.")
 
         meta = dict(metadata or {})
         if correlation_id is not None:
