@@ -1,5 +1,5 @@
 import pytest
-pytestmark = pytest.mark.skip(reason="Requires PostgreSQL")
+#pytestmark = pytest.mark.skip(reason="Requires PostgreSQL")
 """
 tests/test_event_store.py
 =========================
@@ -12,8 +12,15 @@ Run: pytest tests/test_event_store.py -v
 import asyncio, pytest, sys
 from pathlib import Path; sys.path.insert(0, str(Path(__file__).parent.parent))
 from ledger.event_store import EventStore, OptimisticConcurrencyError
+from dotenv import load_dotenv
+import os
 
-DB_URL = "postgresql://localhost/apex_ledger"
+# Load .env automatically
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# Use your DATABASE_URL from .env
+DB_URL = os.getenv("DATABASE_URL")
 
 @pytest.fixture
 async def store():
