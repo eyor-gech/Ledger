@@ -43,6 +43,7 @@ class GeneratedCompany:
     submission_channel: str
     ip_region: str
     compliance_flags: list[dict] = field(default_factory=list)
+    loan_relationships: list[dict] = field(default_factory=list)
 
 def _r2(v): return round(v, 2)
 
