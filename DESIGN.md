@@ -87,6 +87,55 @@ erDiagram
 
 ---
 
+## Agents (Phase 3)
+All agents are deterministic LangGraph graphs that follow the strict sequence:
+`validate_inputs → open_aggregate_record → load_external_data → [domain nodes] → write_output`.
+
+Replay-safe execution logs live in dedicated session streams:
+`agent-{agent_type}-{session_id}`.
+
+### Gas Town recovery
+- On failure, a new session may resume by emitting:
+  - `AgentSessionStarted(context_source="prior_session_replay:...")`
+  - `AgentSessionRecovered(recovery_point="AgentNodeExecuted:{seq}:{name}")`
+- Nodes before the recovery point are skipped; idempotency keys prevent duplicate writes.
+
+---
+
+## Projections (Phase 4)
+Read models are checkpointed and processed in `events.global_position` order:
+- `application_summary`
+- `compliance_audit`
+- `agent_trace`
+
+Checkpointing uses `projection_checkpoints.global_position`.
+Realtime triggers use `LISTEN/NOTIFY` on channel `ledger_events` (emitted by `EventStore.append()`).
+
+---
+
+## MCP Interface (Phase 5)
+FastMCP server: `ledger/mcp/server.py`
+
+Tools:
+- `submit_application`
+- `record_credit_analysis` (requests credit analysis)
+- `trigger_compliance_check`
+
+Resources:
+- `ledger://applications/{application_id}` (projection-backed, falls back to raw events)
+- `ledger://audit/{application_id}/temporal?as_of=...` (best-effort temporal stream view)
+
+---
+
+## Advanced Features (Phase 6)
+- **Audit chain verification**: each stream maintains a SHA-256 hash chain (`events.prev_hash` → `events.event_hash`).
+  Verification helper: `ledger/audit.py`.
+- **Upcasting**: versioned events are upgraded at read-time only via `ledger/upcasters.py`.
+- **What-if engine**: in-memory branching via replay into a forked `InMemoryEventStore` (`ledger/what_if.py`).
+- **Temporal queries**: helpers in `ledger/temporal.py` support `as_of` filtering and correlation scans.
+
+---
+
 ## Optimistic Concurrency Control (OCC)
 ### Invariants
 - A stream’s version is **the last written `stream_position`**.
