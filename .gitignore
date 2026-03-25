@@ -8,3 +8,5 @@ structure.py
 documents/
 data/
 artifacts/
+ledger/agents/testing.py
+test_event_store.py
