@@ -1,14 +1,12 @@
 """
-ledger/registry/client.py — Applicant Registry read-only client
-===============================================================
-COMPLETION STATUS: STUB — implement the query methods.
-
-This client reads from the applicant_registry schema in PostgreSQL.
+ledger/registry/client.py — Applicant Registry read-only client (asyncpg)
+===========================================================================
+This client reads from the `applicant_registry` schema in PostgreSQL.
 It is READ-ONLY. No agent or event store component ever writes here.
-The Applicant Registry is the external CRM — seeded by datagen/generate_all.py.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Protocol, Sequence
 import asyncpg
 
 @dataclass
@@ -34,6 +32,13 @@ class FinancialYear:
 class ComplianceFlag:
     flag_type: str; severity: str; is_active: bool; added_date: str; note: str
 
+class RegistryClient(Protocol):
+    async def get_company(self, company_id: str) -> CompanyProfile | None: ...
+    async def get_financial_history(self, company_id: str, years: list[int] | None = None) -> list[FinancialYear]: ...
+    async def get_compliance_flags(self, company_id: str, active_only: bool = False) -> list[ComplianceFlag]: ...
+    async def get_loan_relationships(self, company_id: str) -> list[dict]: ...
+
+
 class ApplicantRegistryClient:
     """
     READ-ONLY access to the Applicant Registry.
@@ -45,34 +50,74 @@ class ApplicantRegistryClient:
         self._pool = pool
 
     async def get_company(self, company_id: str) -> CompanyProfile | None:
-        """
-        TODO: implement
-        SELECT * FROM applicant_registry.companies WHERE company_id = $1
-        """
-        raise NotImplementedError
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT company_id, name, industry, naics, jurisdiction, legal_type, founded_year,
+                       employee_count, risk_segment, trajectory, submission_channel, ip_region
+                FROM applicant_registry.companies
+                WHERE company_id = $1
+                """,
+                company_id,
+            )
+        if row is None:
+            return None
+        d = dict(row)
+        # Backfill optional fields for older seeds
+        d.setdefault("submission_channel", "UNKNOWN")
+        d.setdefault("ip_region", "UNKNOWN")
+        return CompanyProfile(**d)  # type: ignore[arg-type]
 
     async def get_financial_history(self, company_id: str,
                                      years: list[int] | None = None) -> list[FinancialYear]:
+        query = """
+            SELECT fiscal_year,
+                   total_revenue, gross_profit, operating_income, ebitda, net_income,
+                   total_assets, total_liabilities, total_equity,
+                   long_term_debt, cash_and_equivalents,
+                   current_assets, current_liabilities,
+                   accounts_receivable, inventory,
+                   debt_to_equity, current_ratio, debt_to_ebitda, interest_coverage_ratio,
+                   gross_margin, ebitda_margin, net_margin
+            FROM applicant_registry.financial_history
+            WHERE company_id = $1
         """
-        TODO: implement
-        SELECT * FROM applicant_registry.financial_history
-        WHERE company_id = $1 [AND fiscal_year = ANY($2)]
-        ORDER BY fiscal_year ASC
-        """
-        raise NotImplementedError
+        params: list[object] = [company_id]
+        if years:
+            query += " AND fiscal_year = ANY($2::int[])"
+            params.append(list(map(int, years)))
+        query += " ORDER BY fiscal_year ASC"
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        return [FinancialYear(**dict(r)) for r in rows]  # type: ignore[arg-type]
 
     async def get_compliance_flags(self, company_id: str,
                                     active_only: bool = False) -> list[ComplianceFlag]:
+        query = """
+            SELECT flag_type, severity, is_active, added_date, note
+            FROM applicant_registry.compliance_flags
+            WHERE company_id = $1
         """
-        TODO: implement
-        SELECT * FROM applicant_registry.compliance_flags
-        WHERE company_id = $1 [AND is_active = TRUE]
-        """
-        raise NotImplementedError
+        params: list[object] = [company_id]
+        if active_only:
+            query += " AND is_active = TRUE"
+        query += " ORDER BY added_date ASC"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        return [ComplianceFlag(**dict(r)) for r in rows]  # type: ignore[arg-type]
 
     async def get_loan_relationships(self, company_id: str) -> list[dict]:
-        """
-        TODO: implement
-        SELECT * FROM applicant_registry.loan_relationships WHERE company_id = $1
-        """
-        raise NotImplementedError
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT relationship_id, product_type, start_date, original_amount_usd,
+                       current_balance_usd, default_occurred, last_payment_date,
+                       relationship_status, notes
+                FROM applicant_registry.loan_relationships
+                WHERE company_id = $1
+                ORDER BY start_date ASC
+                """,
+                company_id,
+            )
+        return [dict(r) for r in rows]
