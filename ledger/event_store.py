@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import json
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
 from uuid import UUID, uuid4
 
@@ -282,6 +282,19 @@ class EventStore:
                             prev_hash,
                         )
 
+                        # Realtime projections: notify last global_position (single notification per tx).
+                        if global_positions:
+                            await conn.execute(
+                                "SELECT pg_notify('ledger_events', $1)",
+                                _canonical_json(
+                                    {
+                                        "stream_id": stream_id,
+                                        "count": len(global_positions),
+                                        "last_global_position": max(global_positions),
+                                    }
+                                ),
+                            )
+
                         return positions
 
             except OptimisticConcurrencyError:
@@ -333,8 +346,8 @@ class EventStore:
 
         for row in rows:
             e = dict(row)
-            e["payload"] = dict(e["payload"])
-            e["metadata"] = dict(e["metadata"])
+            #e["payload"] = dict(e["payload"])
+            #e["metadata"] = dict(e["metadata"])
 
             if self.upcasters:
                 e = self.upcasters.upcast(e)
@@ -377,8 +390,8 @@ class EventStore:
 
             for row in rows:
                 e = dict(row)
-                e["payload"] = dict(e["payload"])
-                e["metadata"] = dict(e["metadata"])
+                #e["payload"] = dict(e["payload"])
+                #e["metadata"] = dict(e["metadata"])
 
                 if self.upcasters:
                     e = self.upcasters.upcast(e)
@@ -476,6 +489,7 @@ class InMemoryEventStore:
         self._locks: dict[str, asyncio.Lock] = {}
         self._checkpoints: dict[str, int] = {}
         self._stream_meta: dict[str, dict[str, Any]] = {}
+        self._last_recorded_at: datetime | None = None
 
     def _lock_for(self, stream_id: str) -> asyncio.Lock:
         lock = self._locks.get(stream_id)
@@ -515,6 +529,8 @@ class InMemoryEventStore:
                 raise OptimisticConcurrencyError(stream_id, expected_version, current)
 
             aggregate_type = stream_id.split("-", 1)[0] if "-" in stream_id else stream_id
+            # Ensure recorded_at is monotonic (millisecond+ precision temporal queries).
+            # This mirrors PostgreSQL's `clock_timestamp()` behavior in practice.
             now = datetime.now(timezone.utc)
             if stream_id not in self._stream_meta:
                 self._stream_meta[stream_id] = {
@@ -532,6 +548,10 @@ class InMemoryEventStore:
 
             positions: list[int] = []
             for i, event in enumerate(events):
+                ev_now = datetime.now(timezone.utc)
+                if self._last_recorded_at is not None and ev_now <= self._last_recorded_at:
+                    ev_now = self._last_recorded_at + timedelta(microseconds=1)
+                self._last_recorded_at = ev_now
                 stream_position = expected_version + 1 + i
                 event_type = str(event["event_type"])
                 event_version = int(event.get("event_version") or 1)
@@ -543,7 +563,7 @@ class InMemoryEventStore:
                     event_version=event_version,
                     payload=payload,
                     metadata=meta,
-                    recorded_at=now,
+                    recorded_at=ev_now,
                     prev_hash=prev_hash,
                 )
                 stored = {
@@ -555,7 +575,7 @@ class InMemoryEventStore:
                     "event_version": event_version,
                     "payload": payload,
                     "metadata": dict(meta),
-                    "recorded_at": now,
+                    "recorded_at": ev_now,
                     "prev_hash": prev_hash.hex() if prev_hash else None,
                     "event_hash": event_hash.hex(),
                 }
