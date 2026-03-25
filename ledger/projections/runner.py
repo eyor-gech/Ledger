@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -85,6 +86,16 @@ async def run_once(
                     await _save_checkpoint(conn, p.name, gp)
                     checkpoints[p.name] = gp
 
+    latest_gp = None
+        
+    async for ev in store.load_all(from_position=0, batch_size=1):
+        latest_gp = int(ev["global_position"])
+
+    if latest_gp is not None:
+        for p in projections:
+            current_cp = checkpoints.get(p.name, 0)
+            lag = latest_gp - current_cp
+            print(f"[LAG] Projection={p.name} lag={lag}")
 
 async def listen_and_project(
     *,
