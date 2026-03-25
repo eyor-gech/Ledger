@@ -13,3 +13,4 @@ test_event_store.py
 main.py
 .venv/
 .python-version
+Ledger-app

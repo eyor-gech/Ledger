@@ -32,3 +32,10 @@ class ModelVersionMismatch(DomainError):
 
     def __str__(self) -> str:
         return f"Model version mismatch: expected={self.expected!r} actual={self.actual!r}"
+
+@dataclass
+class DomainSemanticError(DomainError):
+    event_type: str
+
+    def __str__(self) -> str:
+        return f"DomainSemanticError: event_type='{self.event_type}' not in EVENT_REGISTRY"

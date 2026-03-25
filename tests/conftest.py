@@ -11,7 +11,12 @@ random.seed(42); Faker.seed(42)
 
 @pytest.fixture
 def db_url():
-    return os.environ.get("TEST_DB_URL", "postgresql://localhost/apex_ledger_test")
+    url = os.environ.get("TEST_DB_URL", "postgresql://localhost/apex_ledger_test")
+
+    if "test" not in url:
+        raise RuntimeError(f"Refusing to run tests on non-test DB: {url}")
+
+    return url
 
 @pytest.fixture
 def sample_companies():

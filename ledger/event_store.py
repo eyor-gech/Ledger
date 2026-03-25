@@ -20,7 +20,8 @@ from uuid import UUID, uuid4
 
 import asyncpg
 
-from ledger.schema.events import StreamMetadata
+from ledger.schema.events import StreamMetadata, EVENT_REGISTRY
+from ledger.domain.errors import DomainSemanticError
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Exceptions
@@ -144,6 +145,11 @@ class EventStore:
 
         if not events:
             return []
+        for event in events:
+            et = event.get("event_type")
+
+            if not et:
+                raise DomainSemanticError(event_type="MISSING")
 
         aggregate_type = stream_id.split("-", 1)[0]
 
@@ -512,6 +518,11 @@ class InMemoryEventStore:
     ) -> list[int]:
         if not events:
             return []
+        for event in events:
+            et = event.get("event_type")
+
+            if et not in EVENT_REGISTRY:
+                raise DomainSemanticError(event_type=et)
 
         meta = dict(metadata or {})
         if correlation_id is not None:
