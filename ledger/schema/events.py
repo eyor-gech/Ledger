@@ -146,7 +146,9 @@ class FinancialFacts(LedgerModel):
     current_ratio: float | None = None
     debt_to_ebitda: float | None = None
     interest_coverage: float | None = None
+    interest_coverage_ratio: float | None = None
     gross_margin: float | None = None
+    ebitda_margin: float | None = None
     net_margin: float | None = None
 
     # Provenance
@@ -195,7 +197,8 @@ class BaseEvent(LedgerModel):
     event_id: UUID = Field(default_factory=uuid4)
 
     def to_payload(self) -> dict[str, Any]:
-        data = self.model_dump(mode="python")
+        # JSON mode ensures enums/datetimes/decimals are serialized deterministically for storage.
+        data = self.model_dump(mode="json")
         data.pop("event_type", None)
         data.pop("event_version", None)
         data.pop("event_id", None)
