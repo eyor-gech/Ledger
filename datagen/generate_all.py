@@ -1,5 +1,5 @@
 """
-datagen/generate_all.py — Main entry point for the Apex data generator.
+datagen/generate_all.py — Main entry point for the Apex data generator
 Orchestrates: company generation → document generation → event simulation → DB write → validation.
 
 Run: python datagen/generate_all.py [--help]
@@ -16,7 +16,14 @@ from datagen.pdf_generator import (generate_income_statement_pdf, generate_balan
 from datagen.excel_generator import generate_financial_excel
 from datagen.event_simulator import EventSimulator
 from datagen.schema_validator import SchemaValidator
+from dotenv import load_dotenv
 
+# Load .env automatically
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# Use your DATABASE_URL from .env
+DATABASE_URL = os.getenv("DATABASE_URL")
 fake = Faker()
 
 SEED_SCENARIOS = [
@@ -203,7 +210,7 @@ def main():
     p.add_argument("--applicants", type=int, default=80)
     p.add_argument("--output-dir", default="./data")
     p.add_argument("--docs-dir", default="./documents")
-    p.add_argument("--db-url", default="postgresql://localhost/apex_ledger")
+    p.add_argument("--db-url", default=DATABASE_URL)
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--skip-db", action="store_true")
     p.add_argument("--skip-docs", action="store_true")
@@ -228,36 +235,120 @@ def main():
     print(f"       Compliance flags: {sum(1 for c in companies if c.compliance_flags)}")
     mt = next((c for c in companies if c.jurisdiction=="MT"), None)
     print(f"       Montana (REG-003): {mt.company_id if mt else 'NONE — regenerate!'}")
-    with open(f"{args.output_dir}/applicant_profiles.json","w") as f:
-        json.dump([{"company_id":c.company_id,"name":c.name,"industry":c.industry,
-                    "jurisdiction":c.jurisdiction,"legal_type":c.legal_type,
-                    "trajectory":c.trajectory,"risk_segment":c.risk_segment,
-                    "compliance_flags":c.compliance_flags} for c in companies], f, indent=2)
+    # Compatibility file (used by earlier phases)
+    with open(f"{args.output_dir}/applicant_profiles.json", "w", encoding="utf-8") as f:
+        json.dump(
+            [
+                {
+                    "company_id": c.company_id,
+                    "name": c.name,
+                    "industry": c.industry,
+                    "jurisdiction": c.jurisdiction,
+                    "legal_type": c.legal_type,
+                    "trajectory": c.trajectory,
+                    "risk_segment": c.risk_segment,
+                    "compliance_flags": c.compliance_flags,
+                }
+                for c in companies
+            ],
+            f,
+            indent=2,
+        )
+
+    # Phase 3+ registry exports (agents may run without a live registry DB)
+    registry_dir = Path(args.output_dir) / "registry"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    (registry_dir / "README.txt").write_text(
+        "Applicant Registry exports for offline agent execution.\n"
+        "- companies.jsonl: 1 row per company\n"
+        "- financial_history.jsonl: 1 row per (company_id,fiscal_year)\n"
+        "- compliance_flags.jsonl: 1 row per flag\n"
+        "- loan_relationships.jsonl: 1 row per prior loan\n",
+        encoding="utf-8",
+    )
+
+    with (registry_dir / "companies.jsonl").open("w", encoding="utf-8") as f:
+        for c in companies:
+            f.write(
+                json.dumps(
+                    {
+                        "company_id": c.company_id,
+                        "name": c.name,
+                        "industry": c.industry,
+                        "naics": c.naics,
+                        "jurisdiction": c.jurisdiction,
+                        "legal_type": c.legal_type,
+                        "founded_year": c.founded_year,
+                        "employee_count": c.employee_count,
+                        "risk_segment": c.risk_segment,
+                        "trajectory": c.trajectory,
+                        "submission_channel": c.submission_channel,
+                        "ip_region": c.ip_region,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+    with (registry_dir / "financial_history.jsonl").open("w", encoding="utf-8") as f:
+        for c in companies:
+            for fy in c.financials:
+                f.write(json.dumps({"company_id": c.company_id, **fy}, sort_keys=True, default=str) + "\n")
+
+    with (registry_dir / "compliance_flags.jsonl").open("w", encoding="utf-8") as f:
+        for c in companies:
+            for flg in c.compliance_flags or []:
+                f.write(json.dumps({"company_id": c.company_id, **flg}, sort_keys=True, default=str) + "\n")
+
+    with (registry_dir / "loan_relationships.jsonl").open("w", encoding="utf-8") as f:
+        for c in companies:
+            for rel in c.loan_relationships or []:
+                f.write(json.dumps({"company_id": c.company_id, **rel}, sort_keys=True, default=str) + "\n")
 
     # ── Step 2: Documents ──────────────────────────────────────────────────────
     if not args.skip_docs:
         print(f"\n[2/5] Generating financial documents (PDF + Excel + CSV)...")
         count = 0
+        manifest: dict[str, dict[str, str]] = {}
         for i, c in enumerate(companies):
             d = Path(args.docs_dir)/c.company_id; d.mkdir(exist_ok=True)
             y = 2024
             # Distribute PDF variants for realism
             inc_variant = "missing_ebitda" if i%20==0 else "dense" if i%15==0 else "scanned" if i%12==0 else "clean"
             bs_variant = "scanned" if i%10==0 else "clean"
-            generate_income_statement_pdf(c, y, str(d/f"income_statement_{y}.pdf"), inc_variant)
-            generate_balance_sheet_pdf(c, y, str(d/f"balance_sheet_{y}.pdf"), bs_variant)
-            generate_application_proposal_pdf(c, f"APEX-PROP-{c.company_id}",
-                c.financials[-1]["total_revenue"]*random.uniform(0.10,0.35),
-                random.choice(c.loan_purposes), str(d/"application_proposal.pdf"))
-            generate_financial_excel(c, str(d/"financial_statements.xlsx"))
+            inc_path = str(d/f"income_statement_{y}.pdf")
+            bs_path = str(d/f"balance_sheet_{y}.pdf")
+            prop_path = str(d/"application_proposal.pdf")
+            xlsx_path = str(d/"financial_statements.xlsx")
+            csv_path = str(d/"financial_summary.csv")
+            generate_income_statement_pdf(c, y, inc_path, inc_variant)
+            generate_balance_sheet_pdf(c, y, bs_path, bs_variant)
+            generate_application_proposal_pdf(
+                c,
+                f"APEX-PROP-{c.company_id}",
+                c.financials[-1]["total_revenue"] * random.uniform(0.10, 0.35),
+                random.choice(c.loan_purposes),
+                prop_path,
+            )
+            generate_financial_excel(c, xlsx_path)
             # CSV summary
-            with open(str(d/"financial_summary.csv"),"w",newline="") as f:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f); w.writerow(["field","value","fiscal_year","currency"])
                 for k,v in c.financials[-1].items():
                     if isinstance(v,(int,float)) and k!="fiscal_year":
                         w.writerow([k,v,2024,"USD"])
+            manifest[c.company_id] = {
+                "income_statement_pdf": inc_path,
+                "balance_sheet_pdf": bs_path,
+                "application_proposal_pdf": prop_path,
+                "financial_statements_xlsx": xlsx_path,
+                "financial_summary_csv": csv_path,
+                "income_variant": inc_variant,
+                "balance_variant": bs_variant,
+            }
             count += 5
             if (i+1)%20==0: print(f"  ... {i+1}/{len(companies)} done")
+        (Path(args.docs_dir) / "index.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         print(f"  [OK] {count} files in {args.docs_dir}/")
 
     # ── Step 3: Simulate Events ────────────────────────────────────────────────
