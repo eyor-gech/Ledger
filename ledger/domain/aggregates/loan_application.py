@@ -78,6 +78,8 @@ class LoanApplication:
         if self.state is None:
             self.state = target
             return
+        if self.state == target:
+            return
         allowed = _ALLOWED.get(self.state, set())
         if target not in allowed:
             raise IllegalStateTransition("LoanApplication", self.state.value, target.value)
@@ -104,6 +106,10 @@ class LoanApplication:
     def guard_can_accept_credit_analysis_result(self) -> None:
         if self.state != ApplicationState.CREDIT_ANALYSIS_REQUESTED:
             raise InvariantViolation(f"Credit analysis result requires CREDIT_ANALYSIS_REQUESTED, got {self.state}")
+
+    def guard_can_complete_human_review(self) -> None:
+        if self.state != ApplicationState.PENDING_HUMAN_REVIEW:
+            raise InvariantViolation(f"Human review completion requires PENDING_HUMAN_REVIEW, got {self.state}")
 
     # ── Event application ──
 
