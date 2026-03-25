@@ -8,11 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-@dataclass(frozen=True)
+@dataclass
 class DomainError(Exception):
     """Base type for all domain-layer errors."""
 
-@dataclass(frozen=True)
+@dataclass
 class IllegalStateTransition(DomainError):
     aggregate: str
     current: Optional[str]
@@ -21,11 +21,11 @@ class IllegalStateTransition(DomainError):
     def __str__(self) -> str:
         return f"{self.aggregate}: illegal transition {self.current!r} -> {self.target!r}"
 
-@dataclass(frozen=True)
+@dataclass
 class InvariantViolation(DomainError):
     message: str
 
-@dataclass(frozen=True)
+@dataclass
 class ModelVersionMismatch(DomainError):
     expected: str
     actual: str
