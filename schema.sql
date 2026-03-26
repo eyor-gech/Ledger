@@ -250,4 +250,35 @@ CREATE TABLE IF NOT EXISTS agent_trace (
 CREATE INDEX IF NOT EXISTS ix_agent_trace_application
     ON agent_trace(application_id, agent_type, started_at);
 
+-- Aggregate performance ledger (rollups for SLO monitoring / cost reporting)
+CREATE TABLE IF NOT EXISTS agent_performance_ledger (
+    agent_type           TEXT NOT NULL,
+    model_version        TEXT NOT NULL,
+    sessions_completed   INTEGER NOT NULL DEFAULT 0,
+    sessions_failed      INTEGER NOT NULL DEFAULT 0,
+    total_tokens_used    BIGINT NOT NULL DEFAULT 0,
+    total_cost_usd       NUMERIC(18,6) NOT NULL DEFAULT 0,
+    total_duration_ms    BIGINT NOT NULL DEFAULT 0,
+    last_global_position BIGINT NOT NULL DEFAULT 0,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (agent_type, model_version)
+);
+
+CREATE INDEX IF NOT EXISTS ix_agent_performance_updated
+    ON agent_performance_ledger(updated_at);
+
+-- Projection failure tracking (fault tolerance / skip-after-retries)
+CREATE TABLE IF NOT EXISTS projection_failures (
+    projection_name  TEXT NOT NULL,
+    global_position  BIGINT NOT NULL,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT NULL,
+    first_failed_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    last_failed_at   TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (projection_name, global_position)
+);
+
+CREATE INDEX IF NOT EXISTS ix_projection_failures_recent
+    ON projection_failures(projection_name, last_failed_at);
+
 COMMIT;

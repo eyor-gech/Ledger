@@ -1,228 +1,120 @@
-# The Ledger — Event-Sourced, Multi-Agent Loan Decisioning (Phase 0–2)
+# DESIGN — The Ledger (Production-Grade Event Sourcing in Python/Async)
 
-## Goals
-- **Auditability**: every state transition is derived from immutable events.
-- **Replayability**: every agent execution is reconstructible from an agent session stream.
-- **Temporal queries**: projections can rebuild from `events.global_position` checkpoints.
-- **Verifiability**: events carry a per-stream cryptographic hash chain.
+## 1) Aggregate Boundaries: Why ComplianceRecord separate from LoanApplication? Merge coupling → specific concurrent write failure?
+**Why separate**
+- `LoanApplication` (`loan-{application_id}`) owns the **lifecycle state machine** and final decision invariants.
+- `ComplianceRecord` (`compliance-{application_id}`) owns **rule evaluation facts** and the compliance verdict.
 
-Non-goals (Phase 0–2): production decision policies, real document/registry integrations, advanced agent reasoning.
+This separation keeps each aggregate’s invariants cohesive and minimizes OCC contention:
+- Compliance writes tend to be **bursty** (many rule outcomes).
+- Loan lifecycle writes are **stage transitions** and final decisions.
 
----
+**Concrete “merge failure” if Compliance were merged into `loan-{id}`**
+- Compliance agent appends N rule outcome events while decision orchestrator appends `DecisionGenerated`.
+- With a single merged stream:
+  - both writers contend on the same `event_streams` row lock,
+  - the decision writer frequently loses with `OptimisticConcurrencyError`,
+  - the system burns retry budget and increases tail latency.
 
-## Aggregate Boundaries (DDD)
+Keeping compliance separate allows:
+- compliance to progress independently,
+- decision orchestration to read compliance facts via projection or replay without being blocked by compliance’s higher write volume.
 
-| Aggregate | Stream ID pattern | Source-of-truth state |
-|---|---|---|
-| `LoanApplication` | `loan-{application_id}` | application lifecycle + decision outcomes |
-| `DocumentPackage` | `docpkg-{application_id}` | document intake + extraction lifecycle |
-| `AgentSession` | `agent-{agent_type}-{session_id}` | replay-safe agent run timeline |
-| `CreditRecord` | `credit-{application_id}` | credit analysis outputs |
-| `FraudScreening` | `fraud-{application_id}` | fraud screening outputs |
-| `ComplianceRecord` | `compliance-{application_id}` | deterministic rule results + verdict |
-| `AuditLedger` | `audit-{entity_id}` | integrity check runs / chain attestations |
+## 2) Projection Strategy: Per projection: Inline vs Async + SLO. ComplianceAuditView: snapshot trigger (event/time/manual) + invalidation logic?
+**Projection mode**
+- **Inline projections** (inside `append()` transaction) provide “read-your-writes” but increase write latency and coupling.
+- **Async projections** (daemon) preserve write throughput and isolate failures at the cost of lag.
 
----
+This repo uses **async projections**:
+- triggers via `NOTIFY ledger_events`,
+- sequential consistency by processing `events.global_position` in order,
+- durable checkpoints (`projection_checkpoints`).
 
-## Event Sourcing + CQRS
-- **Writes**: append-only to `events` (log-as-truth).
-- **Reads**: aggregates rebuild via `load_stream()`; projections rebuild via `load_all()` ordered by `global_position`.
-- **CQRS**: write model is the event log; read models are projection tables (not required yet beyond checkpoints).
+**SLO**
+- Target projection lag: `< 500ms` for interactive screens under moderate load.
+- `ledger://health` exposes per-projection lag in ms so clients can show freshness.
 
----
+**ComplianceAuditView snapshots**
+- `ComplianceAuditView.get_compliance_at(application_id, timestamp)` reconstructs from the compliance stream “as-of” time (millisecond precision).
+- `ComplianceAuditView.rebuild_from_scratch()` uses a **shadow table + atomic swap**:
+  - build `compliance_audit_rebuild_*` from `events`,
+  - swap tables in a short transaction,
+  - old table serves reads until swap (no downtime).
 
-## PostgreSQL Schema (Phase 0)
-Canonical schema lives in `schema.sql`.
+**Invalidation logic**
+- Any new compliance-related event (e.g., `ComplianceRuleFailed`, `ComplianceCheckCompleted`) invalidates cached compliance state for that `application_id` (projection updates are idempotent by global_position).
 
-### Tables
-- `event_streams`: stream head (`current_version`, `last_event_hash`)
-- `events`: immutable append-only event log with total order `global_position`
-- `outbox`: publishable messages written in the same transaction as events
-- `snapshots`: optional read optimization (not required for correctness)
-- `projection_checkpoints`: per-projection `global_position` cursor
+## 3) Concurrency Analysis: Peak (100 apps, 4 agents): Expected OptimisticConcurrencyErrors/min on loan-{id} streams? Retry strategy + max budget?
+**Mechanism**
+- Per stream, `EventStore.append()` uses `SELECT ... FOR UPDATE` on `event_streams` and checks `expected_version` strictly.
+- Losers get `OptimisticConcurrencyError(stream_id, expected, actual)` and must reload + retry.
 
-### ER Diagram
-```mermaid
-erDiagram
-  event_streams ||--o{ events : contains
-  events ||--o{ outbox : produces
-  event_streams ||--o| snapshots : snapshots
+**Estimate (explicitly approximate)**
+Assume:
+- For a given application, 4 agents can attempt to append to `loan-{id}` concurrently (e.g., orchestrator + compliance + fraud + credit) during transitions.
+- The critical section for a stream lock is ~`20ms` (transaction + inserts).
+- Each agent attempts one write per ~`2s` during active processing.
 
-  event_streams {
-    text stream_id PK
-    text aggregate_type
-    int current_version
-    bytea last_event_hash
-  }
+Approx collision rate per application (rough):
+- 4 writers × 0.5 writes/s each = 2 writes/s total.
+- Probability of overlap in a 20ms window ≈ `rate * window` = `2 * 0.02 = 0.04` (4%).
+- Expected OCC failures per second per app ≈ overlaps × competing writers ≈ ~`0.04 * (some factor ~1)` → ~0.04/s.
+- Over a minute of active contention: ~`2.4` OCC failures/app/min.
 
-  events {
-    bigint global_position PK
-    uuid event_id
-    text stream_id FK
-    int stream_position
-    text event_type
-    int event_version
-    jsonb payload
-    jsonb metadata
-    timestamptz recorded_at
-    bytea prev_hash
-    bytea event_hash
-  }
+Peak 100 applications (worst-case all contending) would be ~`240` OCC failures/min. In practice, contention is far lower because:
+- agents are orchestrated sequentially most of the time,
+- many writes are to non-loan streams (`credit-*`, `compliance-*`, `agent-*`).
 
-  outbox {
-    bigint outbox_id PK
-    uuid event_id FK
-    text stream_id
-    int stream_position
-    text topic
-    jsonb payload
-    text status
-  }
+**Retry strategy**
+- Retry only on **transient** DB errors inside `EventStore.append()` (deadlocks/serialization).
+- For OCC mismatches:
+  - reload aggregate(s),
+  - re-run guards,
+  - retry append with updated `expected_version`.
 
-  projection_checkpoints {
-    text projection_name PK
-    bigint global_position
-  }
-```
+**Budget**
+- For command handlers: max 3 OCC retries (bounded latency).
+- For agent node writes: `BaseApexAgent.append_events_with_occ_retry()` uses bounded exponential backoff.
 
----
+## 4) Upcasting Inference: Per inferred field: error rate + downstream impact. Null vs inference: when?
+**Principles**
+- Upcasters run **only on read**; raw DB payload remains immutable.
+- When inference is ambiguous: set `None` (or empty containers for “unknown set”) and let downstream treat it as unknown.
 
-## Agents (Phase 3)
-All agents are deterministic LangGraph graphs that follow the strict sequence:
-`validate_inputs → open_aggregate_record → load_external_data → [domain nodes] → write_output`.
+**Examples**
+- `DecisionGenerated v1 -> v2`: add `model_versions`.
+  - Inference: if v1 had a single `model_version`, mapping it to a namespaced dict is ambiguous.
+  - Strategy: `model_versions={}` (unknown), error rate minimized; downstream treats missing as “no claim”.
+- `CreditAnalysisCompleted v1 -> v2`: add `regulatory_basis` and `model_versions`.
+  - Strategy: `regulatory_basis=[]`, `model_versions={}` to preserve correctness without fabrication.
 
-Replay-safe execution logs live in dedicated session streams:
-`agent-{agent_type}-{session_id}`.
+**Downstream impact**
+- Analytics: can safely group “unknown model_versions” separately.
+- Compliance reporting: never fabricates justification fields.
 
-### Gas Town recovery
-- On failure, a new session may resume by emitting:
-  - `AgentSessionStarted(context_source="prior_session_replay:...")`
-  - `AgentSessionRecovered(recovery_point="AgentNodeExecuted:{seq}:{name}")`
-- Nodes before the recovery point are skipped; idempotency keys prevent duplicate writes.
+## 5) EventStoreDB Mapping: PG schema → ES concepts (streams, $all sub, persistent subs). What ES provides your impl works harder for?
+**Mapping**
+- Streams: `events.stream_id` + `events.stream_position`
+- `$all`: `events.global_position` (total order)
+- Stream head: `event_streams.current_version`
+- Metadata: `events.metadata` (includes `correlation_id`, `causation_id`, idempotency keys)
+- Subscriptions:
+  - implemented as `LISTEN/NOTIFY` + checkpointed polling
+  - (no native persistent subscription group semantics)
 
----
+**What ESDB provides that we implement manually**
+- Subscription coordination + competing consumers: we rely on checkpoints + (optional) external coordination.
+- Server-side projections: we maintain our own projector code + retry/skip policy.
+- Stream truncation/metadata streams: we provide `archive_stream` and stream metadata manually.
 
-## Projections (Phase 4)
-Read models are checkpointed and processed in `events.global_position` order:
-- `application_summary`
-- `compliance_audit`
-- `agent_trace`
+## 6) Rethink One Decision: Single biggest architectural redo with another day. Distinguish built vs best.
+**Built (pragmatic)**
+- Projection daemon runs as a single-process async loop with retry + skip-after-retries.
+- Agent session lookup for recovery can scan `$all` in demo/test mode.
 
-Checkpointing uses `projection_checkpoints.global_position`.
-Realtime triggers use `LISTEN/NOTIFY` on channel `ledger_events` (emitted by `EventStore.append()`).
-
----
-
-## MCP Interface (Phase 5)
-FastMCP server: `ledger/mcp/server.py`
-
-Tools:
-- `submit_application`
-- `record_credit_analysis` (requests credit analysis)
-- `trigger_compliance_check`
-
-Resources:
-- `ledger://applications/{application_id}` (projection-backed, falls back to raw events)
-- `ledger://audit/{application_id}/temporal?as_of=...` (best-effort temporal stream view)
-
----
-
-## Advanced Features (Phase 6)
-- **Audit chain verification**: each stream maintains a SHA-256 hash chain (`events.prev_hash` → `events.event_hash`).
-  Verification helper: `ledger/audit.py`.
-- **Upcasting**: versioned events are upgraded at read-time only via `ledger/upcasters.py`.
-- **What-if engine**: in-memory branching via replay into a forked `InMemoryEventStore` (`ledger/what_if.py`).
-- **Temporal queries**: helpers in `ledger/temporal.py` support `as_of` filtering and correlation scans.
-
----
-
-## Optimistic Concurrency Control (OCC)
-### Invariants
-- A stream’s version is **the last written `stream_position`**.
-- Appends must supply `expected_version` that matches `event_streams.current_version`.
-- If mismatched, `OptimisticConcurrencyError` is raised and callers decide whether/how to retry.
-
-### Strategy
-`EventStore.append()` executes in a single transaction:
-1. `INSERT ... ON CONFLICT DO NOTHING` for `event_streams` (ensures stream row exists).
-2. `SELECT ... FOR UPDATE` on `event_streams` row (serializes concurrent writers per stream).
-3. Compare `current_version` to `expected_version` (strict OCC).
-4. Insert N events, updating the per-stream hash chain (`prev_hash` → `event_hash`).
-5. Insert matching `outbox` rows for each event (same transaction).
-6. Update stream head (`current_version`, `last_event_hash`).
-7. `pg_notify('ledger_events', ...)` for projection daemons.
-
-### Retry policy
-- OCC mismatches are **not retried** in `EventStore`; they are surfaced to callers.
-- Transient DB errors (serialization / deadlocks / unique conflicts) are retried with exponential backoff.
-
----
-
-## Cryptographic Verifiability (Hash Chain)
-- Each event stores `prev_hash` and `event_hash`.
-- `event_hash = SHA256(canonical_json(event_fields + prev_hash))`
-- `event_streams.last_event_hash` is the head pointer.
-
-Verification: replay a stream in `stream_position` order and recompute `event_hash`, checking it matches the stored `event_hash` and links via `prev_hash`.
-
----
-
-## Outbox Guarantees
-- Outbox rows are written **in the same transaction** as events.
-- Ordering is preserved per stream via `(stream_id, stream_position)`.
-- Consumers should process outbox rows in `(stream_id, stream_position)` order (or globally by `created_at/global_position` depending on transport).
-
----
-
-## Projection Flow (Realtime + Checkpointing)
-Projections are consumers of the immutable log:
-1. LISTEN on `ledger_events`.
-2. On notification, read events from `events` ordered by `global_position` starting at checkpoint.
-3. Apply to read model(s).
-4. Persist checkpoint in `projection_checkpoints`.
-
-```mermaid
-flowchart LR
-  A["EventStore.append()"] -->|pg_notify| B["Projection Daemon (LISTEN)"]
-  B --> C["load_all(from checkpoint)"]
-  C --> D["Apply to read model"]
-  D --> E["save_checkpoint(projection_name, global_position)"]
-```
-
----
-
-## Upcasters (Versioned Events)
-- Upcasters run **only on read** (load/replay), never on append.
-- `ledger/upcasters.py` provides a registry that upgrades old payloads to the current schema version.
-
-Flow:
-```mermaid
-flowchart LR
-  A["events row (event_type, event_version, payload)"] --> B["UpcasterRegistry.upcast()"]
-  B --> C["deserialize_event() (Pydantic v2)"]
-  C --> D["Aggregate.apply()"]
-```
-
----
-
-## Agent Execution Lifecycle (Replay-Safe Logging)
-Each agent run writes to an `agent-{agent_type}-{session_id}` stream:
-1. `AgentSessionStarted`
-2. `AgentInputValidated` / `AgentInputValidationFailed`
-3. For each node: `AgentNodeExecuted`
-4. For each tool call: `AgentToolCalled`
-5. `AgentOutputWritten`
-6. `AgentSessionCompleted` / `AgentSessionFailed`
-
-The node sequence is deterministic and the `AgentSession` aggregate enforces contiguous `node_sequence`.
-
----
-
-## Key Files
-- `schema.sql`: PostgreSQL schema
-- `init_db.py`: idempotent DB initializer
-- `ledger/event_store.py`: asyncpg EventStore + InMemoryEventStore
-- `ledger/schema/events.py`: canonical Pydantic event models (strict + frozen)
-- `ledger/domain/aggregates/*.py`: deterministic replay aggregates
-- `ledger/agents/base_agent.py`: async LangGraph agent framework (Phase 2)
+**Best (with another day)**
+- Add a dedicated **agent_session index projection** (session_id → stream_id, last_node_sequence, status).
+  - Eliminates `$all` scans for Gas Town recovery and MCP session resources.
+  - Reduces worst-case recovery lookup from O(total events) to O(1).
+  - Improves performance predictability under large histories.
 
