@@ -60,22 +60,16 @@ class ComplianceAuditView:
         async with self.pool.acquire() as conn:
             await conn.execute(f"CREATE TABLE {tmp} (LIKE compliance_audit INCLUDING ALL)")
 
-        # Re-apply relevant events in global order into the tmp table.
-        async for e in self.store.load_all(
-            from_global_position=0,
-            event_types=["ComplianceRuleFailed", "ComplianceCheckCompleted"],
-            batch_size=500,
-        ):
+        async for e in self.store.load_all(from_global_position=0, event_types=["ComplianceRuleFailed", "ComplianceCheckCompleted"], batch_size=500):
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     await self._apply_to_table(conn, table=tmp, event=e)
 
-        # Atomic swap (reads continue against old table until this point).
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("ALTER TABLE compliance_audit RENAME TO compliance_audit_old")
-                await conn.execute(f"ALTER TABLE {tmp} RENAME TO compliance_audit")
-                await conn.execute("DROP TABLE compliance_audit_old")
+            await conn.execute(f"ALTER TABLE {tmp} RENAME TO compliance_audit")
+            await conn.execute("DROP TABLE compliance_audit_old")
 
     async def _apply_to_table(self, conn: asyncpg.Connection, *, table: str, event: dict[str, Any]) -> None:
         et = str(event.get("event_type") or "")

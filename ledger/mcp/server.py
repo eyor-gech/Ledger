@@ -661,29 +661,19 @@ def create_mcp_server(*, db_url: str | None = None) -> FastMCP:
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
                 cps = await conn.fetch("SELECT projection_name, global_position FROM projection_checkpoints")
-                # Best-effort lag ms per projection (no daemon required)
-                latest = await conn.fetchrow(
-                    "SELECT global_position, recorded_at FROM events ORDER BY global_position DESC LIMIT 1"
-                )
+                latest = await conn.fetchrow("SELECT global_position, recorded_at FROM events ORDER BY global_position DESC LIMIT 1")
                 lags: dict[str, int] = {}
-                if latest is not None:
+                if latest:
                     latest_ts = latest["recorded_at"]
                     latest_gp = int(latest["global_position"])
                     for r in cps:
-                        name = str(r["projection_name"])
                         cp_gp = int(r["global_position"] or 0)
                         if cp_gp >= latest_gp:
-                            lags[name] = 0
+                            lags[r["projection_name"]] = 0
                             continue
                         cp_ts = await conn.fetchval("SELECT recorded_at FROM events WHERE global_position=$1", cp_gp)
-                        if cp_ts is None:
-                            lags[name] = 0
-                        else:
-                            lags[name] = max(0, int((latest_ts - cp_ts).total_seconds() * 1000))
+                        lags[r["projection_name"]] = max(0, int((latest_ts - cp_ts).total_seconds() * 1000)) if cp_ts else 0
                 return {"ok": True, "db": "up", "projection_lag_ms": lags}
-            return {"ok": True, "db": "up"}
         finally:
             await pool.close()
             await store.close()
-
-    return mcp

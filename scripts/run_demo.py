@@ -31,7 +31,9 @@ from ledger.agents import (
     DocumentProcessingAgent,
     FraudDetectionAgent,
 )
-from ledger.agents.testing import FakeAnthropicClient
+#from ledger.agents.testing import FakeAnthropicClient
+from anthropic import Anthropic
+from dotenv import load_dotenv
 from ledger.audit import verify_store_stream
 from ledger.domain.handlers import HumanReviewCompletedCommand, SubmitApplicationCommand, handle_human_review_completed, handle_submit_application
 from ledger.event_store import InMemoryEventStore
@@ -215,7 +217,11 @@ async def main() -> int:
     await _seed_application(store, application_id=application_id, company_id=company.company_id)
     await _append_uploads(store, application_id=application_id, docs=docs)
 
-    llm = FakeAnthropicClient()
+    load_dotenv()
+    llm = Anthropic(
+        api_key=os.getenv("ANTHROPIC_API_KEY"),  # Your sk-or-v1-bb7e...
+        base_url="https://openrouter.ai/api/v1"  # OpenRouter endpoint
+    )
     doc_agent = DocumentProcessingAgent(agent_id="doc-agent-1", agent_type=AgentType.DOCUMENT_PROCESSING, store=store, registry=registry, llm_client=llm, model_version="demo-model", docs_root=docs_root)
     credit_agent = CreditAnalysisAgent(agent_id="credit-agent-1", agent_type=AgentType.CREDIT_ANALYSIS, store=store, registry=registry, llm_client=llm, model_version="demo-model")
     fraud_agent = FraudDetectionAgent(agent_id="fraud-agent-1", agent_type=AgentType.FRAUD_DETECTION, store=store, registry=registry, llm_client=llm, model_version="demo-model")
