@@ -110,6 +110,13 @@ class LoanApplication:
     def guard_can_complete_human_review(self) -> None:
         if self.state != ApplicationState.PENDING_HUMAN_REVIEW:
             raise InvariantViolation(f"Human review completion requires PENDING_HUMAN_REVIEW, got {self.state}")
+    def guard_can_request_compliance_check(self):
+        if self.state != ApplicationState.FRAUD_SCREENING_COMPLETE:
+            raise InvariantViolation(
+                f"Compliance check requires FRAUD_SCREENING_COMPLETE, got {self.state}"
+            )
+
+
 
     # ── Event application ──
 
