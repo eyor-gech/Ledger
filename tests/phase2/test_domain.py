@@ -22,7 +22,8 @@ async def test_credit_analysis_completed_appends_event():
     agent_stream_id = f"agent-{agent_session_id}"
     credit_stream_id = f"credit-{application_id}"
 
-    # ✅ EXACT state flow from loan_application.py: SUBMITTED → DOCUMENTS_PROCESSED → CREDIT_ANALYSIS_REQUESTED
+    # ✅ Exact state flow from loan_application.py:
+    # SUBMITTED → DOCUMENTS_PENDING → DOCUMENTS_UPLOADED → DOCUMENTS_PROCESSED → CREDIT_ANALYSIS_REQUESTED
     await store.append(
         stream_id=f"loan-{application_id}",
         events=[
@@ -42,7 +43,34 @@ async def test_credit_analysis_completed_appends_event():
                     "application_reference": f"app-ref-{application_id}",
                 },
             },
-            # 2. Skip document events → directly to DOCUMENTS_PROCESSED via PackageReadyForAnalysis
+            # 2. DOCUMENTS_PENDING
+            {
+                "event_type": "DocumentUploadRequested",
+                "payload": {
+                    "application_id": application_id,
+                    "required_document_types": ["income_statement"],
+                    "deadline": now,
+                    "requested_by": "SYSTEM",
+                },
+            },
+            # 3. DOCUMENTS_UPLOADED
+            {
+                "event_type": "DocumentUploaded",
+                "payload": {
+                    "application_id": application_id,
+                    "document_id": f"doc-{application_id}",
+                    "document_type": "income_statement",
+                    "document_format": "pdf",
+                    "filename": "income.pdf",
+                    "file_path": f"documents/{application_id}/income.pdf",
+                    "file_size_bytes": 123,
+                    "file_hash": "hash-income",
+                    "fiscal_year": 2025,
+                    "uploaded_at": now,
+                    "uploaded_by": "applicant",
+                },
+            },
+            # 4. DOCUMENTS_PROCESSED
             {
                 "event_type": "PackageReadyForAnalysis",
                 "payload": {
@@ -54,7 +82,7 @@ async def test_credit_analysis_completed_appends_event():
                     "ready_at": now,
                 },
             },
-            # 3. CREDIT_ANALYSIS_REQUESTED ✓ satisfies guard_can_accept_credit_analysis_result()
+            # 5. CREDIT_ANALYSIS_REQUESTED ✓ satisfies guard_can_accept_credit_analysis_result()
             {
                 "event_type": "CreditAnalysisRequested",
                 "payload": {
@@ -70,16 +98,46 @@ async def test_credit_analysis_completed_appends_event():
     # Supporting streams
     await store.append(
         stream_id=agent_stream_id,
-        events=[{"event_type": "AgentContextLoaded", "payload": {}}],
+        events=[
+            {
+                "event_type": "AgentSessionStarted",
+                "payload": {
+                    "session_id": agent_session_id,
+                    "agent_type": "credit_analysis",
+                    "agent_id": "agent-1",
+                    "application_id": application_id,
+                    "model_version": "v1.0",
+                    "langgraph_graph_version": "1",
+                    "context_source": "fresh",
+                    "context_token_count": 0,
+                    "started_at": now,
+                },
+            },
+            {
+                "event_type": "AgentContextLoaded",
+                "payload": {
+                    "session_id": agent_session_id,
+                    "agent_type": "credit_analysis",
+                    "application_id": application_id,
+                    "model_version": "v1.0",
+                    "context_source": "fresh",
+                    "context_hash": "ctxhash",
+                    "loaded_at": now,
+                },
+            },
+        ],
         expected_version=-1,
     )
-    await store.append(stream_id=credit_stream_id, events=[], expected_version=-1)
 
     # ✅ CreditDecision schema from credit_record.py (no 'recommendation')
     decision = {
         "risk_tier": "LOW",
         "confidence": 0.85,
         "recommended_limit_usd": 10000,
+        "rationale": "ok",
+        "key_concerns": [],
+        "data_quality_caveats": [],
+        "policy_overrides_applied": [],
     }
 
     cmd = CreditAnalysisCompletedCommand(
@@ -112,7 +170,7 @@ async def test_credit_analysis_completed_appends_event():
     assert payload["model_version"] == "v1.0"
     assert payload["decision"]["risk_tier"] == "LOW"
     assert payload["decision"]["confidence"] == 0.85
-    assert payload["decision"]["recommended_limit_usd"] == 10000
+    assert Decimal(str(payload["decision"]["recommended_limit_usd"])) == Decimal("10000")
 
 
 @pytest.mark.anyio

@@ -10,8 +10,16 @@ from ledger.what_if import branch_in_memory
 @pytest.mark.asyncio
 async def test_audit_chain_verification_detects_tampering():
     store = InMemoryEventStore()
-    await store.append("s-1", [{"event_type": "E1", "event_version": 1, "payload": {"a": 1}}], expected_version=-1)
-    await store.append("s-1", [{"event_type": "E2", "event_version": 1, "payload": {"b": 2}}], expected_version=0)
+    await store.append(
+        "s-1",
+        [{"event_type": "ApplicationSubmitted", "event_version": 1, "payload": {"a": 1}}],
+        expected_version=-1,
+    )
+    await store.append(
+        "s-1",
+        [{"event_type": "DocumentUploadRequested", "event_version": 1, "payload": {"b": 2}}],
+        expected_version=0,
+    )
 
     events = await store.load_stream("s-1", from_position=0)
     ok, errors = verify_stream_hash_chain(events)
@@ -68,14 +76,26 @@ async def test_upcasting_v1_to_v2_is_read_time_only():
 @pytest.mark.asyncio
 async def test_what_if_branch_does_not_mutate_base():
     base = InMemoryEventStore()
-    await base.append("loan-X", [{"event_type": "E1", "event_version": 1, "payload": {"x": 1}}], expected_version=-1)
-    await base.append("loan-X", [{"event_type": "E2", "event_version": 1, "payload": {"x": 2}}], expected_version=0)
+    await base.append(
+        "loan-X",
+        [{"event_type": "ApplicationSubmitted", "event_version": 1, "payload": {"x": 1}}],
+        expected_version=-1,
+    )
+    await base.append(
+        "loan-X",
+        [{"event_type": "DocumentUploaded", "event_version": 1, "payload": {"x": 2}}],
+        expected_version=0,
+    )
 
     branch = await branch_in_memory(base_store=base, branch_id="b1", up_to_global_position=0)
     assert await base.stream_version("loan-X") == 1
     assert await branch.store.stream_version("loan-X") == 0
 
-    await branch.store.append("loan-X", [{"event_type": "WHATIF", "event_version": 1, "payload": {"x": 99}}], expected_version=0)
+    await branch.store.append(
+        "loan-X",
+        [{"event_type": "CreditAnalysisRequested", "event_version": 1, "payload": {"x": 99}}],
+        expected_version=0,
+    )
     assert await base.stream_version("loan-X") == 1
     assert await branch.store.stream_version("loan-X") == 1
 
@@ -83,11 +103,18 @@ async def test_what_if_branch_does_not_mutate_base():
 @pytest.mark.asyncio
 async def test_temporal_query_as_of_filters_by_recorded_at():
     store = InMemoryEventStore()
-    await store.append("s", [{"event_type": "E1", "event_version": 1, "payload": {}}], expected_version=-1)
-    await store.append("s", [{"event_type": "E2", "event_version": 1, "payload": {}}], expected_version=0)
+    await store.append(
+        "s",
+        [{"event_type": "ApplicationSubmitted", "event_version": 1, "payload": {}}],
+        expected_version=-1,
+    )
+    await store.append(
+        "s",
+        [{"event_type": "DocumentUploadRequested", "event_version": 1, "payload": {}}],
+        expected_version=0,
+    )
     events = await store.load_stream("s", from_position=0)
     cutoff = events[0]["recorded_at"]
     as_of = cutoff.isoformat()
     filtered = await load_stream_as_of(store, "s", as_of=parse_as_of(as_of))
-    assert [e["event_type"] for e in filtered] == ["E1"]
-
+    assert [e["event_type"] for e in filtered] == ["ApplicationSubmitted"]
