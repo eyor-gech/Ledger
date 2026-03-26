@@ -96,7 +96,6 @@ def _register_required_upcasters(reg: UpcasterRegistry) -> None:
     def _credit_analysis_completed_v1_to_v2(e: dict[str, Any]) -> dict[str, Any]:
         out = dict(e)
         p = dict(out.get("payload") or {})
-        # v2 adds these fields; defaults are non-fabricated empty containers.
         p.setdefault("regulatory_basis", [])
         p.setdefault("model_versions", {})
         out["payload"] = p
@@ -107,11 +106,19 @@ def _register_required_upcasters(reg: UpcasterRegistry) -> None:
     def _decision_generated_v1_to_v2(e: dict[str, Any]) -> dict[str, Any]:
         out = dict(e)
         p = dict(out.get("payload") or {})
-        # v2 adds model_versions. If unknown historically, default to {} (no claim).
         p.setdefault("model_versions", {})
+
+        # Infer confidence_score if missing
+        if "confidence" not in p or p["confidence"] is None:
+            recommendation = str(p.get("recommendation") or "")
+            p["confidence"] = 0.5 if recommendation == "REFER" else 0.95
+
+        # Infer regulatory_basis from event metadata if missing
+        if "regulatory_basis" not in p:
+            p["regulatory_basis"] = list(e.get("metadata", {}).get("rules_applied", []))
+
         out["payload"] = p
         return out
-
 
 def default_upcasters() -> UpcasterRegistry:
     """

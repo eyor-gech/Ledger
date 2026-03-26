@@ -7,10 +7,9 @@ ComplianceRecord aggregate (Phase 1):
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Callable
 
 from ledger.domain.errors import InvariantViolation
 from ledger.schema.events import BaseEvent, ComplianceVerdict, StoredEvent, deserialize_event
@@ -96,3 +95,10 @@ class ComplianceRecord:
         for e in events_list:  # type: ignore[assignment]
             agg.apply(e)  # type: ignore[arg-type]
         return agg
+
+    @classmethod
+    def load(cls, event_fetcher: Callable[[str], Iterable[StoredEvent]], application_id: str) -> "ComplianceRecord":
+        events = list(event_fetcher(application_id))
+        if not events:
+            raise ValueError(f"No events found for ComplianceRecord {application_id}")
+        return cls.rebuild(events)

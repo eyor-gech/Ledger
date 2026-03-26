@@ -6,10 +6,9 @@ AuditLedger aggregate (Phase 1):
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Callable
 
 from ledger.schema.events import BaseEvent, StoredEvent, deserialize_event
 
@@ -71,3 +70,10 @@ class AuditLedger:
         for e in events_list:  # type: ignore[assignment]
             agg.apply(e)  # type: ignore[arg-type]
         return agg
+
+    @classmethod
+    def load(cls, event_fetcher: Callable[[str], Iterable[StoredEvent]], entity_id: str) -> "AuditLedger":
+        events = list(event_fetcher(entity_id))
+        if not events:
+            raise ValueError(f"No events found for AuditLedger {entity_id}")
+        return cls.rebuild(events)

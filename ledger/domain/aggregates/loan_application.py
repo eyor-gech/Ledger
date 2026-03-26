@@ -239,16 +239,6 @@ class LoanApplication:
     def load(cls, event_fetcher: Callable[[str], Iterable[StoredEvent]], application_id: str) -> "LoanApplication":
         """
         Load a LoanApplication from the event store.
-
-        Args:
-            event_fetcher: Callable that takes application_id and returns Iterable[StoredEvent].
-            application_id: The ID of the LoanApplication to load.
-
-        Returns:
-            LoanApplication instance reconstructed from events.
-
-        Raises:
-            ValueError: If no events are found for the given application_id.
         """
         events = list(event_fetcher(application_id))
         if not events:
