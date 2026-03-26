@@ -394,19 +394,31 @@ class BaseApexAgent(ABC):
     # ──────────────────────────────────────────────────────────────────
 
     async def call_llm_json(self, *, system: str, user: str, max_tokens: int = 800) -> tuple[dict[str, Any], int, int, float]:
-        resp = await self.client.messages.create(
-            model=self.model_version,
-            max_tokens=int(max_tokens),
-            system=str(system),
-            messages=[{"role": "user", "content": str(user)}],
-        )
-        text = self._extract_text(resp)
-        usage = getattr(resp, "usage", None)
-        tok_in = int(getattr(usage, "input_tokens", 0) or 0)
-        tok_out = int(getattr(usage, "output_tokens", 0) or 0)
-        est_cost = round(tok_in / 1e6 * 3.0 + tok_out / 1e6 * 15.0, 6)
-        payload = self._parse_json_object(text)
-        return payload, tok_in, tok_out, est_cost
+        last_exc: BaseException | None = None
+        for attempt in range(3):
+            try:
+                resp = await self.client.messages.create(
+                    model=self.model_version,
+                    max_tokens=int(max_tokens),
+                    system=str(system),
+                    messages=[{"role": "user", "content": str(user)}],
+                )
+                text = self._extract_text(resp)
+                usage = getattr(resp, "usage", None)
+                tok_in = int(getattr(usage, "input_tokens", 0) or 0)
+                tok_out = int(getattr(usage, "output_tokens", 0) or 0)
+                est_cost = round(tok_in / 1e6 * 3.0 + tok_out / 1e6 * 15.0, 6)
+                payload = self._parse_json_object(text)
+                return payload, tok_in, tok_out, est_cost
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.2 * (2**attempt))
+                    continue
+                raise RuntimeError(
+                    f"LLM call failed after retries (agent_type={self.agent_type.value}, model={self.model_version})"
+                ) from exc
+        raise RuntimeError("LLM call failed") from last_exc
 
     # ──────────────────────────────────────────────────────────────────
     # Recovery scanning

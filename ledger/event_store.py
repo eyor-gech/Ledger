@@ -6,7 +6,7 @@ COMPLETION CHECKLIST (implement in order):
   [ ] Phase 1, Day 1: load_stream()
   [ ] Phase 1, Day 2: load_all()  (needed for projection daemon)
   [ ] Phase 1, Day 2: get_event() (needed for causation chain)
-  [ ] Phase 4:        UpcasterRegistry.upcast() integration in load_stream/load_all
+  [ ] Phase 4:         UpcasterRegistry.upcast() integration in load_stream/load_all
 """
 from __future__ import annotations
 
@@ -102,8 +102,26 @@ class EventStore:
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
+        # Register JSON/JSONB codecs so asyncpg accepts dicts directly
+        async def init_connection(conn):
+            await conn.set_type_codec(
+                "jsonb",
+                encoder=json.dumps,
+                decoder=json.loads,
+                schema="pg_catalog"
+            )
+            await conn.set_type_codec(
+                "json",
+                encoder=json.dumps,
+                decoder=json.loads,
+                schema="pg_catalog"
+            )
+
         self._pool = await asyncpg.create_pool(
-            self.db_url, min_size=2, max_size=10
+            self.db_url, 
+            min_size=2, 
+            max_size=10,
+            init=init_connection  # Applies the codec to every connection in the pool
         )
 
     async def close(self) -> None:
@@ -237,8 +255,8 @@ class EventStore:
                                 stream_position,
                                 event_type,
                                 event_version,
-                                _canonical_json(payload),
-                                _canonical_json(meta),
+                                payload,   
+                                meta,      
                                 recorded_at,
                                 prev_hash,
                                 event_hash,
@@ -257,7 +275,7 @@ class EventStore:
                                 stream_id,
                                 stream_position,
                                 event_type,
-                                _canonical_json({
+                                {
                                     "event_id": str(event_id),
                                     "global_position": global_position,
                                     "stream_id": stream_id,
@@ -267,7 +285,7 @@ class EventStore:
                                     "payload": payload,
                                     "metadata": meta,
                                     "recorded_at": recorded_at.isoformat(),
-                                }),
+                                },
                             )
 
                             prev_hash = event_hash
@@ -352,8 +370,11 @@ class EventStore:
 
         for row in rows:
             e = dict(row)
-            #e["payload"] = dict(e["payload"])
-            #e["metadata"] = dict(e["metadata"])
+            if e.get("payload") is not None:
+                e["payload"] = dict(e["payload"])
+
+            if e.get("metadata") is not None:
+                e["metadata"] = dict(e["metadata"])
 
             if self.upcasters:
                 e = self.upcasters.upcast(e)
@@ -369,13 +390,16 @@ class EventStore:
     async def load_all(
         self,
         from_position: int = 0,
+        *,
+        from_global_position: int | None = None,
+        event_types: list[str] | None = None,
         batch_size: int = 500,
     ) -> AsyncGenerator[dict, None]:
 
         if self._pool is None:
             raise RuntimeError("EventStore not connected")
 
-        pos = int(from_position)
+        pos = int(from_global_position if from_global_position is not None else from_position)
 
         while True:
             async with self._pool.acquire() as conn:
@@ -384,11 +408,13 @@ class EventStore:
                     SELECT *
                     FROM events
                     WHERE global_position >= $1
+                      AND ($3::text[] IS NULL OR event_type = ANY($3::text[]))
                     ORDER BY global_position ASC
                     LIMIT $2
                     """,
                     pos,
                     int(batch_size),
+                    event_types,
                 )
 
             if not rows:
@@ -396,8 +422,11 @@ class EventStore:
 
             for row in rows:
                 e = dict(row)
-                #e["payload"] = dict(e["payload"])
-                #e["metadata"] = dict(e["metadata"])
+                if e.get("payload") is not None:
+                    e["payload"] = dict(e["payload"])
+
+                if e.get("metadata") is not None:
+                    e["metadata"] = dict(e["metadata"])
 
                 if self.upcasters:
                     e = self.upcasters.upcast(e)
@@ -621,11 +650,20 @@ class InMemoryEventStore:
             events = [self.upcasters.upcast(e) for e in events]
         return events
 
-    async def load_all(self, from_position: int = 0, batch_size: int = 500) -> AsyncGenerator[dict, None]:
-        pos = int(from_position)
+    async def load_all(
+        self,
+        from_position: int = 0,
+        *,
+        from_global_position: int | None = None,
+        event_types: list[str] | None = None,
+        batch_size: int = 500,
+    ) -> AsyncGenerator[dict, None]:
+        pos = int(from_global_position if from_global_position is not None else from_position)
         while pos < len(self._global):
             batch = self._global[pos : pos + int(batch_size)]
             for e in batch:
+                if event_types is not None and str(e.get("event_type")) not in set(event_types):
+                    continue
                 ev = dict(e)
                 if self.upcasters is not None:
                     ev = self.upcasters.upcast(ev)

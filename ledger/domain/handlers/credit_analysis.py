@@ -17,6 +17,7 @@ from typing import Any
 from ledger.domain.aggregates.agent_session import AgentSession
 from ledger.domain.aggregates.credit_record import CreditRecord
 from ledger.domain.aggregates.loan_application import LoanApplication
+from ledger.domain.errors import InvariantViolation
 from ledger.schema.events import (
     CreditAnalysisCompleted,
     CreditDecision,
@@ -52,21 +53,25 @@ async def handle_credit_analysis_completed(store: Any, cmd: CreditAnalysisComple
     # 1) load
     loan_events = await _load_stored(store, loan_stream)
     if not loan_events:
-        raise ValueError(f"missing stream: {loan_stream}")
+        raise InvariantViolation(f"missing stream: {loan_stream}")
     loan = LoanApplication.rebuild(loan_events)
+
+    # 2) validate loan guard first (so wrong state fails deterministically)
+    loan.guard_can_accept_credit_analysis_result()
 
     agent_events = await _load_stored(store, agent_stream)
     if not agent_events:
-        raise ValueError(f"missing stream: {agent_stream}")
+        raise InvariantViolation(f"missing stream: {agent_stream}")
     session = AgentSession.rebuild(agent_events)
 
     credit_events = await _load_stored(store, credit_stream)
-    if not credit_events:
-        raise ValueError(f"missing stream: {credit_stream}")
-    credit = CreditRecord.rebuild(credit_events)
+    if credit_events:
+        credit = CreditRecord.rebuild(credit_events)
+    else:
+        # First write to the credit stream.
+        credit = CreditRecord(application_id=cmd.application_id)
 
     # 2) validate (aggregate guards only)
-    loan.guard_can_accept_credit_analysis_result()
     session.guard_can_write_output(cmd.model_version)
 
     # 3) events only

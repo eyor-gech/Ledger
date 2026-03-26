@@ -279,3 +279,69 @@ async def project_agent_trace(conn: asyncpg.Connection, event: dict[str, Any]) -
             gp,
         )
 
+
+async def project_agent_performance_ledger(conn: asyncpg.Connection, event: dict[str, Any]) -> None:
+    """
+    Read-model rollup for agent performance/cost.
+
+    Keyed by (agent_type, model_version) and updated in global_position order.
+    """
+    et = str(event.get("event_type") or "")
+    p = dict(event.get("payload") or {})
+    gp = int(event["global_position"])
+
+    if et not in {"AgentSessionCompleted", "AgentSessionFailed"}:
+        return
+
+    agent_type = str(p.get("agent_type") or "")
+    model_version = str(p.get("model_version") or "")
+    if not agent_type or not model_version:
+        return
+
+    if et == "AgentSessionCompleted":
+        tokens = int(p.get("total_tokens_used") or 0)
+        cost = float(p.get("total_cost_usd") or 0.0)
+        dur = int(p.get("total_duration_ms") or 0)
+        await conn.execute(
+            """
+            INSERT INTO agent_performance_ledger(
+                agent_type, model_version, sessions_completed, sessions_failed,
+                total_tokens_used, total_cost_usd, total_duration_ms,
+                last_global_position, updated_at
+            )
+            VALUES ($1,$2,1,0,$3,$4,$5,$6,clock_timestamp())
+            ON CONFLICT (agent_type, model_version) DO UPDATE
+              SET sessions_completed = agent_performance_ledger.sessions_completed + 1,
+                  total_tokens_used = agent_performance_ledger.total_tokens_used + EXCLUDED.total_tokens_used,
+                  total_cost_usd = agent_performance_ledger.total_cost_usd + EXCLUDED.total_cost_usd,
+                  total_duration_ms = agent_performance_ledger.total_duration_ms + EXCLUDED.total_duration_ms,
+                  last_global_position = GREATEST(agent_performance_ledger.last_global_position, EXCLUDED.last_global_position),
+                  updated_at = clock_timestamp()
+            """,
+            agent_type,
+            model_version,
+            tokens,
+            cost,
+            dur,
+            gp,
+        )
+        return
+
+    if et == "AgentSessionFailed":
+        await conn.execute(
+            """
+            INSERT INTO agent_performance_ledger(
+                agent_type, model_version, sessions_completed, sessions_failed,
+                total_tokens_used, total_cost_usd, total_duration_ms,
+                last_global_position, updated_at
+            )
+            VALUES ($1,$2,0,1,0,0,0,$3,clock_timestamp())
+            ON CONFLICT (agent_type, model_version) DO UPDATE
+              SET sessions_failed = agent_performance_ledger.sessions_failed + 1,
+                  last_global_position = GREATEST(agent_performance_ledger.last_global_position, EXCLUDED.last_global_position),
+                  updated_at = clock_timestamp()
+            """,
+            agent_type,
+            model_version,
+            gp,
+        )

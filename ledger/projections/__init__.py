@@ -1,5 +1,6 @@
 from ledger.projections.projectors import (
     project_agent_trace,
+    project_agent_performance_ledger,
     project_application_summary,
     project_compliance_audit,
 )
@@ -12,4 +13,5 @@ __all__ = [
     "project_application_summary",
     "project_compliance_audit",
     "project_agent_trace",
+    "project_agent_performance_ledger",
 ]
