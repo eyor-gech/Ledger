@@ -1,3 +1,4 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eyor-gech/Ledger)
 # The Ledger — Event-Sourced, Multi-Agent Loan Decisioning
 
 An immutable AI “flight recorder” built on **Event Sourcing + CQRS + DDD**:
