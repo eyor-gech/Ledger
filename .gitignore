@@ -17,3 +17,8 @@ Ledger-app
 tests/test_docs/
 templates/
 app.py
+components/
+scripts/run_demo_sse.py
+services/
+streamlit_app.py
+utils/
